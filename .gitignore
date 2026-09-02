@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Data & Vector Store Index files (keep raw docs and benchmarks, ignore generated indices/databases)
+rag_engine/data/chroma/
+rag_engine/data/index/
+*.chroma
+*.sqlite3
+*.db
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,32 @@
+services:
+  rag-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-engine-api
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-huggingface}
+      HF_EMBEDDING_MODEL: ${HF_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      VECTOR_STORE_BACKEND: ${VECTOR_STORE_BACKEND:-chroma}
+      CHUNK_SIZE: ${CHUNK_SIZE:-500}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-50}
+      DENSE_TOP_K: ${DENSE_TOP_K:-10}
+      SPARSE_TOP_K: ${SPARSE_TOP_K:-10}
+      RERANK_TOP_K: ${RERANK_TOP_K:-5}
+      RRF_K: ${RRF_K:-60}
+      VERIFIER_MODE: ${VERIFIER_MODE:-auto}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WARM_MODELS: ${WARM_MODELS:-true}
+    volumes:
+      - ./data:/srv/rag_engine/data
+      - ./logs:/srv/rag_engine/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).getcode()==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
