@@ -48,9 +48,15 @@ _PDF_MAX_HEADING_CHARS = 90
 
 
 def parse_document(filename: str, content: bytes) -> ParsedDocument:
-    """Dispatch to the correct parser based on the file extension."""
+    """Dispatch to the correct parser based on the file extension.
+
+    `filename` becomes `document_name` verbatim (only the suffix is inspected here) —
+    callers decide whether to pass a bare name or a full path. The HTTP ingest endpoint
+    strips to a basename before calling this; local-mode file watching passes the
+    resolved absolute path so chunks/citations can be traced back to the source file.
+    """
     suffix = Path(filename).suffix.lower()
-    name = Path(filename).name
+    name = filename
     if suffix == ".pdf":
         return _parse_pdf(content, name)
     try:

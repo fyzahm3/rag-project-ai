@@ -66,6 +66,36 @@ curl -X POST localhost:8000/v1/evaluate -H 'content-type: application/json' \
      -d '{"include_generation": true}'
 ```
 
+## Local mode (tray daemon)
+
+The same codebase runs a second way: a lightweight daemon that watches folders on your
+machine, keeps them indexed, and gives you instant search from a system tray icon
+(macOS + Windows). It's a config profile, not a fork — it reuses `RAGService` and
+`Indexer` exactly as the server does, just without HTTP or Docker in the loop.
+
+```bash
+pip install -r requirements.txt -r requirements-local.txt
+
+# in .env:
+DEPLOYMENT_MODE=local
+LOCAL_WATCH_DIRS=/Users/you/Documents,/Users/you/Notes
+
+python scripts/run_local_daemon.py
+```
+
+Click the tray icon → **Search…** for a small always-on-top window: type a query,
+press Enter, double-click a result to open the source file in its default app. Files
+in `LOCAL_WATCH_DIRS` are indexed on startup and re-indexed automatically on save;
+deleted files are pruned from the index.
+
+Notes:
+- `DEPLOYMENT_MODE=server` (the default) is unaffected by any of this — local mode is
+  purely additive and lives in `app/local/`.
+- Local mode has no network listener by default, so it doesn't need `API_KEY`/rate
+  limiting — those guard the HTTP server, not the tray daemon.
+- `requirements-local.txt` (watchdog, pystray, Pillow) is separate from
+  `requirements.txt` so the server/Docker image stays exactly as it was.
+
 ## Security notes
 
 - **Auth** — `/v1/ingest`, `/v1/ask` and `/v1/evaluate` are open by default (handy for local dev) but accept an `X-API-Key` header check the moment `API_KEY` is set in the environment. Always set it before exposing the service beyond localhost; the server logs a startup warning if `ENVIRONMENT=prod` with no key configured.

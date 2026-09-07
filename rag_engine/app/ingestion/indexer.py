@@ -155,6 +155,23 @@ class Indexer:
             accepted_vectors.append(unit)
         return accepted
 
+    def remove_document(self, document_name: str) -> int:
+        """Drop every chunk indexed under `document_name` from both stores.
+
+        Used by local-mode file watching to keep the index in sync when a watched
+        file is edited (re-ingest replaces stale chunks) or deleted.
+        """
+        vector_removed = self.vector_store.delete_by_document(document_name)
+        sparse_removed = self.sparse_index.remove_by_document(document_name)
+        if vector_removed or sparse_removed:
+            logger.info(
+                "Removed document %s: %d vector chunks, %d sparse entries",
+                document_name,
+                vector_removed,
+                sparse_removed,
+            )
+        return max(vector_removed, sparse_removed)
+
     def stats(self) -> dict[str, object]:
         return {
             "vector_store": self.vector_store.backend,

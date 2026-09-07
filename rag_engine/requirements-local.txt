@@ -1,0 +1,10 @@
+# Extra dependencies for local (tray daemon) mode only — not needed by, and not
+# installed into, the server/Docker deployment. Install alongside requirements.txt:
+#   pip install -r requirements.txt -r requirements-local.txt
+#
+# tkinter (the search window) ships with the standard CPython installer on macOS and
+# Windows, so it isn't listed here — nothing to pip-install for it on those platforms.
+
+watchdog==4.0.1
+pystray==0.19.5
+Pillow==10.3.0

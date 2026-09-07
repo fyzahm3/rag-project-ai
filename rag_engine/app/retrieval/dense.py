@@ -44,6 +44,9 @@ class VectorStore(Protocol):
     def count(self) -> int:
         ...
 
+    def delete_by_document(self, document_name: str) -> int:
+        ...
+
 
 def _record_from_meta(chunk_id: str, text: str, similarity: float, metadata: dict[str, Any]) -> RetrievedRecord:
     return RetrievedRecord(
@@ -117,6 +120,16 @@ class ChromaVectorStore:
     def count(self) -> int:
         return int(self._collection.count())
 
+    def delete_by_document(self, document_name: str) -> int:
+        if self.count() == 0:
+            return 0
+        existing = self._collection.get(where={"document_name": document_name}, include=[])
+        ids = existing.get("ids", [])
+        if not ids:
+            return 0
+        self._collection.delete(ids=ids)
+        return len(ids)
+
 
 class NumpyVectorStore:
     """Brute-force cosine store; used for tests, CI and tiny deployments without chromadb."""
@@ -162,6 +175,26 @@ class NumpyVectorStore:
     def count(self) -> int:
         with self._lock:
             return len(self._ids)
+
+    def delete_by_document(self, document_name: str) -> int:
+        with self._lock:
+            if not self._ids:
+                return 0
+            keep_indices = [
+                i
+                for i, chunk_id in enumerate(self._ids)
+                if self._docs.get(chunk_id, ("", {}))[1].get("document_name") != document_name
+            ]
+            removed = len(self._ids) - len(keep_indices)
+            if removed == 0:
+                return 0
+            keep_set = set(keep_indices)
+            for i, chunk_id in enumerate(self._ids):
+                if i not in keep_set:
+                    self._docs.pop(chunk_id, None)
+            self._ids = [self._ids[i] for i in keep_indices]
+            self._matrix = self._matrix[keep_indices] if self._matrix is not None else None
+            return removed
 
 
 def get_vector_store(settings: Settings) -> VectorStore:

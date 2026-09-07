@@ -17,3 +17,8 @@ logs/
 !README.md
 Dockerfile
 docker-compose.yml
+
+# Local (tray daemon) mode is not part of the server image.
+app/local/
+requirements-local.txt
+scripts/run_local_daemon.py

@@ -121,3 +121,16 @@ class SparseIndex:
     def count(self) -> int:
         with self._lock:
             return len(self._entries)
+
+    def remove_by_document(self, document_name: str) -> int:
+        with self._lock:
+            before = len(self._entries)
+            self._entries = [
+                e for e in self._entries
+                if e.get("metadata", {}).get("document_name") != document_name
+            ]
+            removed = before - len(self._entries)
+            if removed:
+                self._rebuild()
+                self._persist()
+            return removed

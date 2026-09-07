@@ -23,6 +23,27 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = False
 
+    # "server" runs the FastAPI service (unchanged production path). "local" runs the
+    # tray daemon (scripts/run_local_daemon.py / app.local.daemon) instead — same
+    # Settings, same Indexer/RAGService, different entry point.
+    deployment_mode: Literal["server", "local"] = "server"
+    local_watch_dirs: list[Path] = Field(default_factory=list)
+    local_top_k: int = Field(default=8, ge=1)
+    local_debounce_seconds: float = Field(default=1.5, ge=0.0)
+
+    @field_validator("local_watch_dirs", mode="before")
+    @classmethod
+    def _parse_watch_dirs(cls, value: object) -> object:
+        """Accept a comma-separated LOCAL_WATCH_DIRS env var, not just a JSON list."""
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                return value
+            return [part.strip() for part in stripped.split(",") if part.strip()]
+        return value
+
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     max_upload_mb: int = 25
