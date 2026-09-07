@@ -190,6 +190,10 @@ class Settings(BaseSettings):
 
         if "api_host" not in set_fields:
             self.api_host = "127.0.0.1"
+        if "api_port" not in set_fields:
+            # A distinct default from the server profile's 8000, so both could in
+            # principle run on the same machine without a port clash.
+            self.api_port = 8787
 
         if "llm_provider" not in set_fields:
             self.llm_provider = "openai" if self.openai_api_key else "ollama"

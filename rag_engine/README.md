@@ -77,8 +77,17 @@ own machine, keeps them indexed, and gives you instant search from a system tray
 does, with local-friendly defaults (on-device embeddings, a SQLite FTS5 sparse index
 instead of the in-memory BM25 one, a local Ollama model for generation) swapped in
 underneath. `PROFILE=server` (the default) is completely unaffected — everything
-local-mode-specific lives under `app/local/` plus a handful of profile-gated defaults
-in `app/config.py`.
+local-mode-specific lives in `app/tray.py`, `app/local/`, `app/ingestion/watcher.py`,
+plus a handful of profile-gated defaults in `app/config.py`.
+
+`app/tray.py` is the one script end users actually run day to day: it starts the
+FastAPI server (bound to `127.0.0.1:8787` by default) in a background thread, starts
+the folder crawler/watcher in another, and shows a tray/menu-bar icon with:
+
+- **Open Search** — opens the [web UI](#minimal-local-web-ui) in your default browser
+- **Reindex now** — triggers an immediate crawl, without waiting for the live watcher
+- **Open config file** — opens `config.yaml` in your default text editor
+- **Quit** — stops the watcher and the server cleanly
 
 ### macOS — copy-paste setup
 
@@ -119,16 +128,16 @@ On first run this generates a commented, editable config file — open it, uncom
 - Windows: `%LOCALAPPDATA%\RagSearch\config.yaml`
 
 (Its default already watches `~/Documents` and `~/Desktop`, so the daemon has
-something to index even before you edit it.) Click the tray icon → **Search…** for a
-small always-on-top window: type a query, press Enter, double-click a result to open
-the source file in its default app.
+something to index even before you edit it.)
 
-The same search is also available as a plain web page — the daemon runs a FastAPI
-server under the hood purely to serve it, at `http://127.0.0.1:8000` by default. Open
-it in a browser for a one-box, as-you-type search (`app/static/index.html`, vanilla
-JS, no build step) hitting `GET /v1/find`; each result has an **Open** button that
-calls `POST /v1/open` to launch the file. `GET /` only serves this page under
-`PROFILE=local` — under the server profile it's unchanged (a small JSON status blob).
+### Minimal local web UI
+
+Click the tray icon → **Open Search** to open a plain web page at
+`http://127.0.0.1:8787` (`app/static/index.html`, vanilla JS, no build step): one
+search box, results update as you type against `GET /v1/find`, and each result has
+an **Open** button (`POST /v1/open`) that launches the file in its default app.
+`GET /` only serves this page under `PROFILE=local` — under the server profile it's
+unchanged (a small JSON status blob).
 
 ### What's different under `PROFILE=local`
 
@@ -139,7 +148,7 @@ calls `POST /v1/open` to launch the file. `GET /` only serves this page under
 | Generation | OpenAI (needs `OPENAI_API_KEY`) or extractive fallback | local Ollama model (`qwen2.5:7b` by default) first; automatically prefers OpenAI instead if `OPENAI_API_KEY` is set; falls back to extractive if neither answers |
 | Data location | `./data` (repo-relative) | per-OS app data dir (`~/Library/Application Support/RagSearch` / `%LOCALAPPDATA%\RagSearch`) |
 | Config source | `.env` / env vars | `config.yaml` in that same app data dir (auto-generated), env vars still work as overrides |
-| Auth / rate limiting | `API_KEY` + per-client limiter guard the HTTP routes | not applicable — no HTTP listener; `api_host` still defaults to `127.0.0.1` for anything that does bind a port |
+| Auth / rate limiting | `API_KEY` + per-client limiter guard the HTTP routes | same middleware, same routes, plus `/v1/find` and (local-only) `/v1/open` — but `api_host`/`api_port` default to `127.0.0.1:8787`, not `0.0.0.0:8000` |
 | Excluded from scanning | — | `node_modules`, `.git`, `venv`/`.venv`, `Library`, `AppData`, `*.app`/`*.exe`/`*.dll`, common archives, and anything over `max_index_file_size_mb` (default 25 MB) |
 | Chunk ids | content hash (`sha1(doc, heading, seq, text)`) | `sha256(path)[:16]:seq` — stable across re-indexing an edited file, and lets a whole file's chunks be identified from its path alone |
 
@@ -165,6 +174,27 @@ Notes:
 - The evaluation harness (`/v1/evaluate`, `scripts/seed_data.py`) always runs under
   the server profile's BM25 sparse index, so Recall@K/MRR benchmark numbers stay
   comparable across runs regardless of whether local mode has ever been used.
+
+### Run at login (optional)
+
+Off by default — nothing runs automatically until you execute one of these
+yourself. Each prints exactly what it did and how to undo it.
+
+```bash
+# macOS
+scripts/install_macos.sh
+```
+
+```powershell
+# Windows (no admin rights needed for a per-user logon task)
+powershell -ExecutionPolicy Bypass -File scripts\install_windows.ps1
+```
+
+macOS registers a `launchd` LaunchAgent (`~/Library/LaunchAgents/com.<you>.ragsearch.plist`,
+`RunAtLoad`, `PROFILE=local`); Windows registers a Task Scheduler task
+(`RagSearchLocalDaemon`, trigger: at logon). Both just run
+`scripts/run_local_daemon.py` — undo with `launchctl unload`/`rm` the plist, or
+`Unregister-ScheduledTask`, exactly as each script's own output says.
 
 ## Security notes
 
