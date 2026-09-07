@@ -132,6 +132,16 @@ the source file in its default app.
 | Config source | `.env` / env vars | `config.yaml` in that same app data dir (auto-generated), env vars still work as overrides |
 | Auth / rate limiting | `API_KEY` + per-client limiter guard the HTTP routes | not applicable — no HTTP listener; `api_host` still defaults to `127.0.0.1` for anything that does bind a port |
 | Excluded from scanning | — | `node_modules`, `.git`, `venv`/`.venv`, `Library`, `AppData`, `*.app`/`*.exe`/`*.dll`, common archives, and anything over `max_index_file_size_mb` (default 25 MB) |
+| Chunk ids | content hash (`sha1(doc, heading, seq, text)`) | `sha256(path)[:16]:seq` — stable across re-indexing an edited file, and lets a whole file's chunks be identified from its path alone |
+
+The crawl (`app/ingestion/watcher.py`) walks every `watched_paths` root on startup,
+skipping any file whose (mtime, size) already match what's indexed — so a re-crawl of
+an untouched folder costs a `stat()` per file, not a re-read/re-embed — and logs
+progress every 100 files so a first run over a large folder isn't silent. Indexing
+runs with bounded concurrency (`max_concurrent_indexing`, default 2) so the crawl
+doesn't peg the CPU. Live edits are picked up by `watchdog` with a true per-path
+debounce: a burst of saves to the same file cancels and restarts a single pending
+reindex rather than firing one per event.
 
 Any of these can be overridden explicitly (env var, `.env`, or a value in
 `config.yaml`) without losing the rest of the local defaults — e.g. setting

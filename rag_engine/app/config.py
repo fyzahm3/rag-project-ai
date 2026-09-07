@@ -63,7 +63,8 @@ class Settings(BaseSettings):
     max_index_file_size_mb: int = Field(default=25, ge=1)
     local_device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
     local_top_k: int = Field(default=8, ge=1)
-    local_debounce_seconds: float = Field(default=1.5, ge=0.0)
+    local_debounce_seconds: float = Field(default=2.0, ge=0.0)
+    max_concurrent_indexing: int = Field(default=2, ge=1)
 
     @field_validator("watched_paths", "excluded_patterns", mode="before")
     @classmethod

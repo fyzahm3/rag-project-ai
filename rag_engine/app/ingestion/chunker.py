@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from app.config import Settings
 from app.ingestion.parser import ParsedDocument
-from app.utils.text import sha1_id, split_sentences, truncate
+from app.utils.text import path_doc_id, sha1_id, split_sentences, truncate
 
 EmbedFn = Callable[[list[str]], np.ndarray]
 
@@ -46,7 +46,13 @@ class BaseChunker(ABC):
                 text = truncate(text, self.settings.max_chunk_chars)
             if len(text) < min_chars and len(raw) > 1:
                 continue
-            chunk_id = sha1_id(document.document_name, heading, seq, text[:120])
+            if self.settings.profile == "local":
+                # Path+index based, not content based: stable across re-indexing a
+                # changed file (unchanged chunk positions keep their id), and lets
+                # the local watcher delete a whole file's chunks by id prefix alone.
+                chunk_id = f"{path_doc_id(document.document_name)}:{seq}"
+            else:
+                chunk_id = sha1_id(document.document_name, heading, seq, text[:120])
             chunks.append(
                 Chunk(
                     chunk_id=chunk_id,

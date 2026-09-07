@@ -1,4 +1,4 @@
-"""Exclusion matching for local-mode folder scanning/watching."""
+"""Exclusion matching for crawling/watching local filesystem paths."""
 from __future__ import annotations
 
 import fnmatch

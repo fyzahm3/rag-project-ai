@@ -1,6 +1,8 @@
-"""Local profile entry point: watches configured folders, keeps them indexed, and
-serves search from a tray icon — using the same Settings/build_context/RAGService as
-the FastAPI server (app.main), selected via PROFILE=local.
+"""Local profile entry point: crawls + watches configured folders, keeps them
+indexed, and serves search from a tray icon — using the same
+Settings/build_context/RAGService as the FastAPI server (app.main), selected via
+PROFILE=local. The crawl/watch machinery itself lives in app.ingestion.watcher
+(IndexSyncer, FolderWatcher) since it's an ingestion concern, not a UI one.
 
 Run with:  python -m app.local.daemon   (or scripts/run_local_daemon.py)
 """
@@ -11,9 +13,8 @@ import logging
 import threading
 
 from app.config import Settings, get_settings
-from app.local.sync import IndexSyncer
+from app.ingestion.watcher import FolderWatcher, IndexSyncer
 from app.local.tray import run_tray
-from app.local.watcher import FolderWatcher
 from app.main import build_context, configure_logging
 
 logger = logging.getLogger("rag_engine.local")
@@ -57,6 +58,7 @@ def main() -> int:
         strategy=settings.default_chunking_strategy,
         excluded_patterns=settings.excluded_patterns,
         max_index_file_size_mb=settings.max_index_file_size_mb,
+        max_concurrent_indexing=settings.max_concurrent_indexing,
     )
     stop_event = threading.Event()
 

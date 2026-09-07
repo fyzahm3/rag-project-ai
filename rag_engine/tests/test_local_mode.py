@@ -1,14 +1,15 @@
-"""Offline tests for local-mode indexing: delete-by-document plumbing and IndexSyncer,
-independent of watchdog/pystray/tkinter (none of which are required to run these)."""
+"""Offline tests for local-mode indexing: delete-by-document plumbing, the crawler
+(IndexSyncer) and live watcher (FolderWatcher) debounce logic, independent of
+watchdog/pystray/tkinter (none of which are required to run these)."""
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
 
 from app.config import Settings
+from app.ingestion.filters import exceeds_size_limit, is_excluded
 from app.ingestion.indexer import Indexer
-from app.local.filters import exceeds_size_limit, is_excluded
-from app.local.sync import IndexSyncer
+from app.ingestion.watcher import FolderWatcher, IndexSyncer
 from app.retrieval.dense import NumpyVectorStore
 from app.retrieval.embeddings import HashingEmbedder
 from app.retrieval.sparse import FTS5SparseIndex
@@ -89,7 +90,7 @@ def test_index_syncer_skips_unsupported_extensions(tmp_path: Path, components):
     assert asyncio.run(syncer.index_path(file_path)) is False
 
 
-def test_index_syncer_scan_directory(tmp_path: Path, components):
+def test_crawl_indexes_supported_files_and_reports_stats(tmp_path: Path, components):
     indexer: Indexer = components["indexer"]
     store = components["store"]
     syncer = IndexSyncer(indexer)
@@ -98,9 +99,47 @@ def test_index_syncer_scan_directory(tmp_path: Path, components):
     (tmp_path / "two.txt").write_text("Plain text notes about the launch window.", encoding="utf-8")
     (tmp_path / "skip.bin").write_bytes(b"\x00\x01")
 
-    indexed = asyncio.run(syncer.scan_directory(tmp_path))
-    assert indexed == 2
+    stats = asyncio.run(syncer.crawl([tmp_path]))
+    assert stats.scanned == 3
+    assert stats.indexed == 2
+    assert stats.skipped == 1
+    assert stats.errors == 0
     assert store.count() > 0
+
+
+def test_crawl_second_pass_skips_unchanged_files(tmp_path: Path, settings: Settings):
+    # Needs FTS5SparseIndex (local profile) for skip-if-unchanged to apply at all;
+    # BM25SparseIndex has no per-file tracking, so it always re-indexes (covered by
+    # test_crawl_indexes_supported_files_and_reports_stats instead). The watched
+    # content also has to live outside settings.index_dir, or the crawl would walk
+    # into the sparse index's own storage directory.
+    embedder = HashingEmbedder(dim=128)
+    store = NumpyVectorStore()
+    sparse = FTS5SparseIndex(settings.index_dir / "fts5_index.sqlite3")
+    indexer = Indexer(settings=settings, embedder=embedder, vector_store=store, sparse_index=sparse)
+    syncer = IndexSyncer(indexer)
+
+    content_dir = tmp_path / "content"
+    content_dir.mkdir()
+    (content_dir / "one.md").write_text(SAMPLE_A, encoding="utf-8")
+
+    first = asyncio.run(syncer.crawl([content_dir]))
+    assert first.scanned == 1
+    assert first.indexed == 1
+
+    second = asyncio.run(syncer.crawl([content_dir]))
+    assert second.scanned == 1
+    assert second.indexed == 0
+    assert second.skipped == 1
+
+
+def test_crawl_missing_root_is_reported_not_raised(tmp_path: Path, components):
+    indexer: Indexer = components["indexer"]
+    syncer = IndexSyncer(indexer)
+    missing = tmp_path / "does-not-exist"
+
+    stats = asyncio.run(syncer.crawl([missing]))
+    assert stats.scanned == 0
 
 
 def test_config_parses_comma_separated_watched_paths(tmp_path: Path):
@@ -194,9 +233,9 @@ def test_index_syncer_respects_size_limit(tmp_path: Path, components):
     assert asyncio.run(syncer.index_path(big_file)) is False
 
 
-def test_index_syncer_skips_reindex_when_content_unchanged(tmp_path: Path, settings: Settings):
-    """With FTS5SparseIndex's file-tracking, an unchanged file (e.g. a mtime-only
-    touch) should not be re-embedded on the next pass."""
+def test_index_syncer_skips_reindex_when_stat_unchanged(tmp_path: Path, settings: Settings):
+    """With FTS5SparseIndex's file-tracking, an unchanged file (same mtime/size) is
+    skipped on the next pass without even being read."""
     embedder = HashingEmbedder(dim=128)
     store = NumpyVectorStore()
     sparse = FTS5SparseIndex(settings.index_dir / "fts5_index.sqlite3")
@@ -214,6 +253,57 @@ def test_index_syncer_skips_reindex_when_content_unchanged(tmp_path: Path, setti
     assert asyncio.run(syncer.index_path(file_path)) is False
     assert store.count() == first_count
 
-    # Changed content -> re-indexed.
+    # Changed content (different size) -> re-indexed.
     file_path.write_text(SAMPLE_B, encoding="utf-8")
     assert asyncio.run(syncer.index_path(file_path)) is True
+
+
+def test_local_profile_chunk_ids_are_path_and_index_based(tmp_path: Path, settings: Settings):
+    from app.ingestion.chunker import StructureAwareChunker
+    from app.ingestion.parser import parse_document
+    from app.utils.text import path_doc_id
+
+    local_settings = settings.model_copy(update={"profile": "local"})
+    doc = parse_document("notes.md", SAMPLE_A.encode("utf-8"))
+    chunks = StructureAwareChunker(local_settings).chunk(doc)
+    assert chunks
+    expected_prefix = path_doc_id("notes.md")
+    for chunk in chunks:
+        assert chunk.chunk_id == f"{expected_prefix}:{chunk.seq}"
+
+
+def test_server_profile_chunk_ids_are_content_based(settings: Settings):
+    from app.ingestion.chunker import StructureAwareChunker
+    from app.ingestion.parser import parse_document
+
+    doc = parse_document("notes.md", SAMPLE_A.encode("utf-8"))
+    chunks = StructureAwareChunker(settings).chunk(doc)
+    assert chunks
+    for chunk in chunks:
+        assert ":" not in chunk.chunk_id  # sha1_id output, not the path:index scheme
+
+
+def test_folder_watcher_debounces_rapid_events_to_one_pending_timer(tmp_path: Path, components):
+    """A burst of on_modified events for the same path should cancel the previous
+    pending timer and leave exactly one scheduled, not one per event."""
+
+    async def scenario():
+        indexer: Indexer = components["indexer"]
+        syncer = IndexSyncer(indexer)
+        watcher = FolderWatcher(syncer, [tmp_path], debounce_seconds=10.0)
+        watcher._loop = asyncio.get_running_loop()
+
+        path = tmp_path / "watched.md"
+        watcher._reschedule(path, removed=False)
+        first_handle = watcher._pending[path]
+        watcher._reschedule(path, removed=False)
+        second_handle = watcher._pending[path]
+
+        assert first_handle.cancelled()
+        assert second_handle is not first_handle
+        assert not second_handle.cancelled()
+        assert len(watcher._pending) == 1
+
+        second_handle.cancel()
+
+    asyncio.run(scenario())

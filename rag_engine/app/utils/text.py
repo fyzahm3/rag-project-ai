@@ -77,6 +77,11 @@ def sha1_id(*parts: object) -> str:
     return digest.hexdigest()[:16]
 
 
+def path_doc_id(path: str) -> str:
+    """Stable, content-independent id for a file path (local-mode chunk_id prefix)."""
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
+
+
 def truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
