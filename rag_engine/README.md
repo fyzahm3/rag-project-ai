@@ -69,32 +69,83 @@ curl -X POST localhost:8000/v1/evaluate -H 'content-type: application/json' \
 ## Local mode (tray daemon)
 
 The same codebase runs a second way: a lightweight daemon that watches folders on your
-machine, keeps them indexed, and gives you instant search from a system tray icon
-(macOS + Windows). It's a config profile, not a fork — it reuses `RAGService` and
-`Indexer` exactly as the server does, just without HTTP or Docker in the loop.
+own machine, keeps them indexed, and gives you instant search from a system tray icon
+— no server, no Docker, no OpenAI key required. It's a config **profile**
+(`PROFILE=local`), not a fork: it reuses `RAGService`/`Indexer` exactly as the server
+does, with local-friendly defaults (on-device embeddings, a SQLite FTS5 sparse index
+instead of the in-memory BM25 one, a local Ollama model for generation) swapped in
+underneath. `PROFILE=server` (the default) is completely unaffected — everything
+local-mode-specific lives under `app/local/` plus a handful of profile-gated defaults
+in `app/config.py`.
+
+### macOS — copy-paste setup
 
 ```bash
+git clone https://github.com/fyzahm3/rag-project-ai.git
+cd rag-project-ai/rag_engine
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt -r requirements-local.txt
 
-# in .env:
-DEPLOYMENT_MODE=local
-LOCAL_WATCH_DIRS=/Users/you/Documents,/Users/you/Notes
+# optional: local generation via Ollama instead of the extractive fallback
+brew install ollama && ollama pull qwen2.5:7b
 
+export PROFILE=local
 python scripts/run_local_daemon.py
 ```
 
-Click the tray icon → **Search…** for a small always-on-top window: type a query,
-press Enter, double-click a result to open the source file in its default app. Files
-in `LOCAL_WATCH_DIRS` are indexed on startup and re-indexed automatically on save;
-deleted files are pruned from the index.
+### Windows (PowerShell) — copy-paste setup
+
+```powershell
+git clone https://github.com/fyzahm3/rag-project-ai.git
+cd rag-project-ai\rag_engine
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt -r requirements-local.txt
+
+# optional: local generation via Ollama instead of the extractive fallback
+winget install Ollama.Ollama
+ollama pull qwen2.5:7b
+
+$env:PROFILE = "local"
+python scripts\run_local_daemon.py
+```
+
+On first run this generates a commented, editable config file — open it, uncomment
+`watched_paths`, point it at your folders, and restart:
+
+- macOS: `~/Library/Application Support/RagSearch/config.yaml`
+- Windows: `%LOCALAPPDATA%\RagSearch\config.yaml`
+
+(Its default already watches `~/Documents` and `~/Desktop`, so the daemon has
+something to index even before you edit it.) Click the tray icon → **Search…** for a
+small always-on-top window: type a query, press Enter, double-click a result to open
+the source file in its default app.
+
+### What's different under `PROFILE=local`
+
+| | server (default) | local |
+|---|---|---|
+| Embeddings | configurable, defaults to a local HF model | local HF model `BAAI/bge-small-en-v1.5`, device auto-detected (`mps` on Apple Silicon, `cuda` if available, else `cpu`) |
+| Sparse index | in-memory BM25 (rank-bm25), JSONL-persisted | SQLite FTS5 — built for frequent incremental insert/update/delete as files change, with a `files` table tracking content hashes so an unchanged file is never needlessly re-embedded |
+| Generation | OpenAI (needs `OPENAI_API_KEY`) or extractive fallback | local Ollama model (`qwen2.5:7b` by default) first; automatically prefers OpenAI instead if `OPENAI_API_KEY` is set; falls back to extractive if neither answers |
+| Data location | `./data` (repo-relative) | per-OS app data dir (`~/Library/Application Support/RagSearch` / `%LOCALAPPDATA%\RagSearch`) |
+| Config source | `.env` / env vars | `config.yaml` in that same app data dir (auto-generated), env vars still work as overrides |
+| Auth / rate limiting | `API_KEY` + per-client limiter guard the HTTP routes | not applicable — no HTTP listener; `api_host` still defaults to `127.0.0.1` for anything that does bind a port |
+| Excluded from scanning | — | `node_modules`, `.git`, `venv`/`.venv`, `Library`, `AppData`, `*.app`/`*.exe`/`*.dll`, common archives, and anything over `max_index_file_size_mb` (default 25 MB) |
+
+Any of these can be overridden explicitly (env var, `.env`, or a value in
+`config.yaml`) without losing the rest of the local defaults — e.g. setting
+`EMBEDDING_PROVIDER=openai` under `PROFILE=local` keeps everything else local (FTS5,
+Ollama, app-data paths) and only swaps the embedding backend.
 
 Notes:
-- `DEPLOYMENT_MODE=server` (the default) is unaffected by any of this — local mode is
-  purely additive and lives in `app/local/`.
-- Local mode has no network listener by default, so it doesn't need `API_KEY`/rate
-  limiting — those guard the HTTP server, not the tray daemon.
-- `requirements-local.txt` (watchdog, pystray, Pillow) is separate from
-  `requirements.txt` so the server/Docker image stays exactly as it was.
+- `requirements-local.txt` (watchdog, pystray, Pillow, PyYAML) is separate from
+  `requirements.txt` so the server/Docker image is completely untouched by any of
+  this — verify with `git diff` against a clean checkout that `Dockerfile`,
+  `docker-compose.yml`, and `requirements.txt` are unchanged by local mode.
+- The evaluation harness (`/v1/evaluate`, `scripts/seed_data.py`) always runs under
+  the server profile's BM25 sparse index, so Recall@K/MRR benchmark numbers stay
+  comparable across runs regardless of whether local mode has ever been used.
 
 ## Security notes
 

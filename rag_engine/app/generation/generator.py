@@ -30,26 +30,68 @@ class DraftAnswer(BaseModel):
 
 
 class GroundedGenerator:
+    """Tries each configured LLM provider in order, then falls back to extractive.
+
+    Server profile: unchanged — settings.llm_provider defaults to "openai", so the
+    candidate chain is exactly the old single-client OpenAI path (or none, if
+    OPENAI_API_KEY isn't set, same as before).
+
+    Local profile: settings.llm_provider defaults to "ollama" (or "openai" if
+    OPENAI_API_KEY was set before the daemon started). Ollama exposes an
+    OpenAI-compatible endpoint, so it's just another AsyncOpenAI client pointed at a
+    different base_url — no separate SDK needed. If the preferred provider errors
+    (Ollama not running, model not pulled, ...) and a second one is configured, that's
+    tried next before falling back to extractive.
+    """
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._client = None
+        self._clients: dict[str, object] = {}
 
     @property
     def llm_available(self) -> bool:
+        if self.settings.llm_provider == "ollama":
+            return True  # optimistic: presence isn't network-checked, same as the openai-key check below
         return bool(self.settings.openai_api_key)
 
-    def _ensure_client(self):
-        if self._client is None:
-            if not self.llm_available:
-                raise RuntimeError("OpenAI client requested without OPENAI_API_KEY")
+    def _candidate_providers(self) -> list[tuple[str, str]]:
+        """Ordered (provider, model) pairs to try. Only ever includes ollama when
+        it's the configured preference — server-profile behavior (llm_provider is
+        "openai" by default there) is untouched."""
+        candidates: list[tuple[str, str]] = []
+        if self.settings.llm_provider == "ollama":
+            candidates.append(("ollama", self.settings.ollama_chat_model))
+            if self.settings.openai_api_key:
+                candidates.append(("openai", self.settings.openai_chat_model))
+        elif self.settings.openai_api_key:
+            candidates.append(("openai", self.settings.openai_chat_model))
+        return candidates
+
+    def _ensure_client(self, provider: str):
+        if provider not in self._clients:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(
-                api_key=self.settings.openai_api_key,
-                timeout=self.settings.openai_timeout_seconds,
-                max_retries=self.settings.openai_max_retries,
-            )
-        return self._client
+            if provider == "ollama":
+                client = AsyncOpenAI(
+                    # Ollama's OpenAI-compatible endpoint ignores the key's value but
+                    # requires a non-empty one.
+                    api_key="ollama-local",
+                    base_url=self.settings.ollama_base_url,
+                    timeout=self.settings.openai_timeout_seconds,
+                    max_retries=self.settings.openai_max_retries,
+                )
+            elif provider == "openai":
+                if not self.settings.openai_api_key:
+                    raise RuntimeError("OpenAI client requested without OPENAI_API_KEY")
+                client = AsyncOpenAI(
+                    api_key=self.settings.openai_api_key,
+                    timeout=self.settings.openai_timeout_seconds,
+                    max_retries=self.settings.openai_max_retries,
+                )
+            else:
+                raise ValueError(f"Unknown LLM provider '{provider}'")
+            self._clients[provider] = client
+        return self._clients[provider]
 
     def build_context_block(self, citations: list[SourceCitation]) -> str:
         blocks = [
@@ -62,22 +104,24 @@ class GroundedGenerator:
     async def generate(self, query: str, citations: list[SourceCitation]) -> DraftAnswer:
         if not citations:
             return self._insufficient_answer(query)
-        if self.llm_available:
+        for provider, model in self._candidate_providers():
             try:
-                return await self._generate_llm(query, citations)
+                return await self._generate_llm(query, citations, provider, model)
             except Exception as exc:
-                logger.warning("LLM generation failed (%s); falling back to extractive answer", exc)
+                logger.warning("%s generation failed (%s); trying next option", provider, exc)
         return self.generate_extractive(query, citations)
 
-    async def _generate_llm(self, query: str, citations: list[SourceCitation]) -> DraftAnswer:
-        client = self._ensure_client()
+    async def _generate_llm(
+        self, query: str, citations: list[SourceCitation], provider: str, model: str
+    ) -> DraftAnswer:
+        client = self._ensure_client(provider)
         user_prompt = (
             f"Context blocks:\n\n{self.build_context_block(citations)}\n\n"
             f"Question: {query}\n\n"
             "Answer with inline citations per the system rules."
         )
         response = await client.chat.completions.create(
-            model=self.settings.openai_chat_model,
+            model=model,
             temperature=self.settings.llm_temperature,
             max_tokens=self.settings.llm_max_tokens,
             messages=[
@@ -88,7 +132,13 @@ class GroundedGenerator:
         text = (response.choices[0].message.content or "").strip()
         if not text:
             return self.generate_extractive(query, citations)
-        return DraftAnswer(answer=text, model=self.settings.openai_chat_model, llm_used=True)
+        return DraftAnswer(answer=text, model=f"{provider}:{model}", llm_used=True)
+
+    async def aclose(self) -> None:
+        for client in self._clients.values():
+            aclose = getattr(client, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     def generate_extractive(self, query: str, citations: list[SourceCitation]) -> DraftAnswer:
         """Deterministic sentence-extraction fallback so the pipeline works without an LLM."""

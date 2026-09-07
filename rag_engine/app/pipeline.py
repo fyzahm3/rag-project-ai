@@ -12,7 +12,7 @@ from app.ingestion.indexer import Indexer
 from app.retrieval.dense import DenseRetriever, RetrievedRecord
 from app.retrieval.fusion import reciprocal_rank_fusion
 from app.retrieval.reranker import CrossEncoderReranker
-from app.retrieval.sparse import SparseIndex
+from app.retrieval.sparse import SparseIndexBase
 from app.schemas.eval import StrategyName
 from app.schemas.query import QueryRequest, QueryResponse, SourceCitation
 from app.utils.errors import RetrievalError
@@ -26,7 +26,7 @@ class RAGService:
         self,
         settings: Settings,
         dense: DenseRetriever,
-        sparse: SparseIndex,
+        sparse: SparseIndexBase,
         reranker: CrossEncoderReranker,
         generator: GroundedGenerator,
         verifier: CitationVerifier,

@@ -25,7 +25,7 @@ from app.pipeline import RAGService
 from app.retrieval.dense import DenseRetriever, get_vector_store
 from app.retrieval.embeddings import get_embedder
 from app.retrieval.reranker import CrossEncoderReranker
-from app.retrieval.sparse import SparseIndex
+from app.retrieval.sparse import SparseIndexBase, get_sparse_index
 from app.schemas.eval import EvalReport, EvalRunRequest
 from app.schemas.ingestion import IngestResponse, IndexStatus
 from app.schemas.query import QueryRequest, QueryResponse
@@ -59,7 +59,7 @@ class AppContext:
     settings: Settings
     embedder: object
     store: object
-    sparse: SparseIndex
+    sparse: SparseIndexBase
     dense: DenseRetriever
     indexer: Indexer
     reranker: CrossEncoderReranker
@@ -80,7 +80,7 @@ class AppContext:
 def build_context(settings: Settings) -> AppContext:
     embedder = get_embedder(settings)
     store = get_vector_store(settings)
-    sparse = SparseIndex(settings.index_dir / "bm25_corpus.jsonl")
+    sparse = get_sparse_index(settings)
     dense = DenseRetriever(embedder=embedder, store=store)
     indexer = Indexer(
         settings=settings,
@@ -159,10 +159,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        client = getattr(ctx.generator, "_client", None)
-        if client is not None and hasattr(client, "aclose"):
-            with contextlib.suppress(Exception):
-                await client.aclose()
+        with contextlib.suppress(Exception):
+            await ctx.generator.aclose()
         logger.info("Shutdown complete")
 
 

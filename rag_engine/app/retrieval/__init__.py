@@ -16,7 +16,12 @@ from app.retrieval.embeddings import (
 )
 from app.retrieval.fusion import normalize_scores, reciprocal_rank_fusion
 from app.retrieval.reranker import CrossEncoderReranker
-from app.retrieval.sparse import SparseIndex
+from app.retrieval.sparse import (
+    BM25SparseIndex,
+    FTS5SparseIndex,
+    SparseIndexBase,
+    get_sparse_index,
+)
 
 __all__ = [
     "VectorStore",
@@ -32,5 +37,8 @@ __all__ = [
     "reciprocal_rank_fusion",
     "normalize_scores",
     "CrossEncoderReranker",
-    "SparseIndex",
+    "SparseIndexBase",
+    "BM25SparseIndex",
+    "FTS5SparseIndex",
+    "get_sparse_index",
 ]

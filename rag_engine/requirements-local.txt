@@ -8,3 +8,8 @@
 watchdog==4.0.1
 pystray==0.19.5
 Pillow==10.3.0
+PyYAML==6.0.1
+
+# Generation: Ollama itself is a separate install (https://ollama.com), not a pip
+# package — the local daemon talks to it over HTTP via Ollama's OpenAI-compatible
+# endpoint, reusing the `openai` package already in requirements.txt.

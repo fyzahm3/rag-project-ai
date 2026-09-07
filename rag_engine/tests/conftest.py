@@ -17,7 +17,7 @@ from app.pipeline import RAGService
 from app.retrieval.dense import DenseRetriever, NumpyVectorStore
 from app.retrieval.embeddings import HashingEmbedder
 from app.retrieval.reranker import CrossEncoderReranker
-from app.retrieval.sparse import SparseIndex
+from app.retrieval.sparse import get_sparse_index
 
 
 @pytest.fixture()
@@ -42,7 +42,7 @@ def settings(tmp_path: Path) -> Settings:
 def components(settings: Settings):
     embedder = HashingEmbedder(dim=128)
     store = NumpyVectorStore()
-    sparse = SparseIndex(settings.index_dir / "bm25_corpus.jsonl")
+    sparse = get_sparse_index(settings)
     dense = DenseRetriever(embedder=embedder, store=store)
     indexer = Indexer(settings=settings, embedder=embedder, vector_store=store, sparse_index=sparse)
     reranker = CrossEncoderReranker(settings)

@@ -12,7 +12,7 @@ from app.ingestion.chunker import Chunk, get_chunker
 from app.ingestion.parser import parse_document
 from app.retrieval.dense import RetrievedRecord, VectorStore
 from app.retrieval.embeddings import EmbeddingProvider
-from app.retrieval.sparse import SparseIndex
+from app.retrieval.sparse import SparseIndexBase
 from app.schemas.ingestion import IngestResponse
 from app.utils.errors import IngestionError
 from app.utils.text import sha1_id
@@ -26,7 +26,7 @@ class Indexer:
         settings: Settings,
         embedder: EmbeddingProvider,
         vector_store: VectorStore,
-        sparse_index: SparseIndex,
+        sparse_index: SparseIndexBase,
     ) -> None:
         self.settings = settings
         self.embedder = embedder

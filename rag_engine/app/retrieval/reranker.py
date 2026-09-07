@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 class CrossEncoderReranker:
     def __init__(self, settings: Settings, model_name: str | None = None) -> None:
+        self.settings = settings
         self.model_name = model_name or settings.cross_encoder_model
         self._model = None
         self._load_failed = False
@@ -30,8 +31,13 @@ class CrossEncoderReranker:
         try:
             from sentence_transformers import CrossEncoder
 
-            logger.info("Loading cross-encoder reranker '%s'", self.model_name)
-            self._model = CrossEncoder(self.model_name, max_length=512)
+            device = None
+            if self.settings.profile == "local":
+                from app.utils.device import resolve_device
+
+                device = resolve_device(self.settings.local_device)
+            logger.info("Loading cross-encoder reranker '%s' (device=%s)", self.model_name, device or "auto")
+            self._model = CrossEncoder(self.model_name, max_length=512, device=device)
             return True
         except Exception as exc:
             self._load_failed = True

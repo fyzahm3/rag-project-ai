@@ -75,6 +75,7 @@ class NLICrossEncoderJudge(EntailmentJudge):
     engine_name = "nli_cross_encoder"
 
     def __init__(self, settings: Settings) -> None:
+        self._settings = settings
         self._model_name = settings.nli_model_name
         self._model = None
 
@@ -84,8 +85,13 @@ class NLICrossEncoderJudge(EntailmentJudge):
         try:
             from sentence_transformers import CrossEncoder
 
-            logger.info("Loading NLI model '%s'", self._model_name)
-            self._model = CrossEncoder(self._model_name, max_length=512)
+            device = None
+            if self._settings.profile == "local":
+                from app.utils.device import resolve_device
+
+                device = resolve_device(self._settings.local_device)
+            logger.info("Loading NLI model '%s' (device=%s)", self._model_name, device or "auto")
+            self._model = CrossEncoder(self._model_name, max_length=512, device=device)
             return True
         except Exception as exc:
             logger.warning("NLI model '%s' unavailable (%s)", self._model_name, exc)

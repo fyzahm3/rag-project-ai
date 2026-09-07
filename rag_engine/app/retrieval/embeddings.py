@@ -24,18 +24,19 @@ class EmbeddingProvider(Protocol):
 
 
 class HuggingFaceEmbedder:
-    def __init__(self, model_name: str, batch_size: int = 64) -> None:
+    def __init__(self, model_name: str, batch_size: int = 64, device: str | None = None) -> None:
         self.name = model_name
         self.dim: int | None = None
         self._batch_size = batch_size
+        self._device = device
         self._model = None
 
     def _ensure_model(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            logger.info("Loading HuggingFace embedding model '%s'", self.name)
-            self._model = SentenceTransformer(self.name)
+            logger.info("Loading HuggingFace embedding model '%s' (device=%s)", self.name, self._device or "auto")
+            self._model = SentenceTransformer(self.name, device=self._device)
             self.dim = int(self._model.get_sentence_embedding_dimension())
         return self._model
 
@@ -102,7 +103,12 @@ class OpenAIEmbedder:
 def get_embedder(settings: Settings) -> EmbeddingProvider:
     if settings.embedding_provider == "openai":
         return OpenAIEmbedder(settings)
-    return HuggingFaceEmbedder(settings.hf_embedding_model)
+    device = None
+    if settings.profile == "local":
+        from app.utils.device import resolve_device
+
+        device = resolve_device(settings.local_device)
+    return HuggingFaceEmbedder(settings.hf_embedding_model, device=device)
 
 
 class HashingEmbedder:

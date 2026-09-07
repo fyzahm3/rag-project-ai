@@ -1,6 +1,6 @@
-"""Local deployment mode entry point: watches configured folders, keeps them indexed,
-and serves search from a tray icon — using the same Settings/build_context/RAGService
-as the FastAPI server (app.main), selected via DEPLOYMENT_MODE=local.
+"""Local profile entry point: watches configured folders, keeps them indexed, and
+serves search from a tray icon — using the same Settings/build_context/RAGService as
+the FastAPI server (app.main), selected via PROFILE=local.
 
 Run with:  python -m app.local.daemon   (or scripts/run_local_daemon.py)
 """
@@ -20,11 +20,11 @@ logger = logging.getLogger("rag_engine.local")
 
 
 async def _run_watcher(settings: Settings, syncer: IndexSyncer, stop_event: threading.Event) -> None:
-    watch_dirs = [d.expanduser() for d in settings.local_watch_dirs]
+    watch_dirs = [d.expanduser() for d in settings.watched_paths]
     if not watch_dirs:
         logger.warning(
-            "No LOCAL_WATCH_DIRS configured; nothing will be indexed. "
-            "Set LOCAL_WATCH_DIRS=/path/one,/path/two in .env."
+            "No watched_paths configured; nothing will be indexed. Edit config.yaml "
+            "(see the path logged above) and restart."
         )
         return
 
@@ -39,16 +39,25 @@ async def _run_watcher(settings: Settings, syncer: IndexSyncer, stop_event: thre
 
 def main() -> int:
     settings = get_settings()
-    if settings.deployment_mode != "local":
+    if settings.profile != "local":
         raise SystemExit(
-            "DEPLOYMENT_MODE is not 'local'. Set DEPLOYMENT_MODE=local (env var or .env) "
-            "before running the tray daemon; use `uvicorn app.main:app` for the server mode."
+            "PROFILE is not 'local'. Set PROFILE=local (env var) before running the "
+            "tray daemon; use `uvicorn app.main:app` for the server profile."
         )
     configure_logging(settings)
-    logger.info("Starting local daemon (watch dirs: %s)", settings.local_watch_dirs)
+
+    from app.utils.paths import local_config_path
+
+    logger.info("Starting local daemon (config: %s)", local_config_path())
+    logger.info("Watched paths: %s", settings.watched_paths)
 
     ctx = build_context(settings)
-    syncer = IndexSyncer(ctx.indexer, strategy=settings.default_chunking_strategy)
+    syncer = IndexSyncer(
+        ctx.indexer,
+        strategy=settings.default_chunking_strategy,
+        excluded_patterns=settings.excluded_patterns,
+        max_index_file_size_mb=settings.max_index_file_size_mb,
+    )
     stop_event = threading.Event()
 
     watcher_thread = threading.Thread(
