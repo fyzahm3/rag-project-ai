@@ -66,6 +66,15 @@ curl -X POST localhost:8000/v1/evaluate -H 'content-type: application/json' \
      -d '{"include_generation": true}'
 ```
 
+## Security notes
+
+- **Auth** — `/v1/ingest`, `/v1/ask` and `/v1/evaluate` are open by default (handy for local dev) but accept an `X-API-Key` header check the moment `API_KEY` is set in the environment. Always set it before exposing the service beyond localhost; the server logs a startup warning if `ENVIRONMENT=prod` with no key configured.
+- **Rate limiting** — the same three routes are covered by a per-client, per-process sliding-window limiter (`RATE_LIMIT_PER_MINUTE`, default 30/min). It's in-memory and per-process, so put a real edge limiter in front if you run multiple replicas.
+- **Uploads** — `/v1/ingest` rejects oversized bodies via `Content-Length` where present and enforces `MAX_UPLOAD_MB` while streaming, so an oversized or Content-Length-less upload can't be buffered fully into memory before being rejected.
+- **Evaluation dataset path** — `dataset_path` in `/v1/evaluate` is constrained to resolve inside `DATA_DIR`; absolute paths or `../` traversal outside it are rejected.
+- **Prompt injection** — because `/v1/ingest` accepts arbitrary documents that later get fed into the LLM's context window, the system prompt explicitly instructs the model to treat context blocks as untrusted data, not instructions. This reduces but does not eliminate the risk — gate ingestion behind `API_KEY` in any environment where untrusted parties could reach it.
+- **Error responses** — outside `ENVIRONMENT=prod`, API errors include the underlying exception message to speed up debugging. In `prod` they're replaced with a generic message; details still go to the server log.
+
 ## Design notes
 
 - **Chunking** — three switchable strategies: `FixedChunker` (sliding window + overlap), `StructureAwareChunker` (markdown/HTML/TXT heading sections), `SemanticBoundaryChunker` (splits where cosine distance between consecutive sentence embeddings exceeds a threshold).

@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -30,6 +30,7 @@ from app.schemas.eval import EvalReport, EvalRunRequest
 from app.schemas.ingestion import IngestResponse, IndexStatus
 from app.schemas.query import QueryRequest, QueryResponse
 from app.utils.errors import RAGError
+from app.utils.security import RateLimiter, client_key, require_api_key
 
 logger = logging.getLogger("rag_engine")
 
@@ -139,6 +140,11 @@ async def lifespan(app: FastAPI):
     if ctx is None:
         ctx = build_context(get_settings())
         app.state.ctx = ctx
+    if ctx.settings.environment == "prod" and not ctx.settings.api_key:
+        logger.warning(
+            "Running in 'prod' with no API_KEY set: /v1/ingest, /v1/ask and /v1/evaluate "
+            "are unauthenticated. Set API_KEY to require the X-API-Key header."
+        )
     await _warm_models(ctx)
     stats = ctx.indexer.stats()
     logger.info(
@@ -174,6 +180,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     if ctx is not None:
         app.state.ctx = ctx
 
+    resolved_settings = ctx.settings if ctx is not None else get_settings()
+    limiter = RateLimiter(max_requests=resolved_settings.rate_limit_per_minute, window_seconds=60.0)
+
+    async def enforce_rate_limit(request: Request) -> None:
+        limiter.check(client_key(request))
+
+    protected = [Depends(require_api_key), Depends(enforce_rate_limit)]
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -201,11 +215,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return response
 
     @app.exception_handler(RAGError)
-    async def rag_error_handler(_: Request, exc: RAGError) -> JSONResponse:
+    async def rag_error_handler(request: Request, exc: RAGError) -> JSONResponse:
         logger.error("Domain error %s: %s", exc.error_code, exc.message)
+        app_ctx: AppContext | None = getattr(request.app.state, "ctx", None)
+        expose_details = app_ctx is None or app_ctx.settings.environment != "prod"
+        detail = exc.message if expose_details else "The request could not be processed."
         return JSONResponse(
             status_code=exc.http_status,
-            content={"error": exc.error_code, "detail": exc.message},
+            content={"error": exc.error_code, "detail": detail},
         )
 
     @app.get("/", include_in_schema=False)
@@ -217,6 +234,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         response_model=IngestResponse,
         tags=["Ingestion"],
         summary="Parse, chunk, deduplicate and index a document (PDF/MD/TXT/HTML)",
+        dependencies=protected,
     )
     async def ingest_document(
         http_request: Request,
@@ -233,13 +251,34 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         if suffix not in allowed:
             raise HTTPException(status_code=415, detail=f"Unsupported file type '{suffix}'")
 
-        content = await file.read()
         max_bytes = app_ctx.settings.max_upload_mb * 1024 * 1024
-        if len(content) > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Upload exceeds {app_ctx.settings.max_upload_mb} MB limit",
-            )
+        declared_length = http_request.headers.get("content-length")
+        if declared_length is not None:
+            try:
+                if int(declared_length) > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Upload exceeds {app_ctx.settings.max_upload_mb} MB limit",
+                    )
+            except ValueError:
+                pass
+
+        # Stream-read with a hard cap so a spoofed/absent Content-Length (or chunked
+        # transfer encoding) can't force the whole body into memory before rejection.
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            piece = await file.read(1024 * 1024)
+            if not piece:
+                break
+            total += len(piece)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Upload exceeds {app_ctx.settings.max_upload_mb} MB limit",
+                )
+            chunks.append(piece)
+        content = b"".join(chunks)
         if not content:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
         return await app_ctx.indexer.ingest(filename, content, strategy)
@@ -249,6 +288,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         response_model=QueryResponse,
         tags=["Query"],
         summary="Full RAG pipeline: hybrid retrieval -> RRF -> rerank -> generation -> citation verification",
+        dependencies=protected,
     )
     async def ask(http_request: Request, request: QueryRequest) -> QueryResponse:
         app_ctx: AppContext = http_request.app.state.ctx
@@ -259,6 +299,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         response_model=EvalReport,
         tags=["Evaluation"],
         summary="Run the benchmark harness (Recall@K, MRR, faithfulness) over a golden dataset",
+        dependencies=protected,
     )
     async def evaluate(http_request: Request, request: EvalRunRequest) -> JSONResponse:
         app_ctx: AppContext = http_request.app.state.ctx

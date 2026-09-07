@@ -246,14 +246,24 @@ async def evaluate_from_request(rag: RAGService, verifier: CitationVerifier, set
 
 
 def resolve_dataset_path(settings: Settings, raw_path: str | None) -> Path:
+    """Resolve a (possibly user-supplied) dataset path, constrained to `settings.data_dir`.
+
+    `dataset_path` arrives from the /v1/evaluate request body, so an absolute path or a
+    `../` traversal must not be allowed to escape the data directory onto the rest of
+    the filesystem.
+    """
+    base = settings.data_dir.resolve()
     candidate = Path(raw_path) if raw_path else settings.benchmark_path
     if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-        if not candidate.exists():
-            alternative = settings.data_dir.parent / candidate.name
-            if alternative.exists():
-                return alternative
-    return candidate
+        candidate = base / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise EvaluationError(
+            f"dataset_path must resolve inside the data directory ({base.name}/)"
+        ) from exc
+    return resolved
 
 
 def save_report(report: EvalReport, reports_dir: Path) -> tuple[Path, Path]:

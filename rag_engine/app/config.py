@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     api_port: int = 8000
     max_upload_mb: int = 25
 
+    api_key: str | None = None
+    rate_limit_per_minute: int = Field(default=30, ge=1)
+
     openai_api_key: str | None = None
     openai_chat_model: str = "gpt-4o-mini"
     openai_embedding_model: str = "text-embedding-3-small"
