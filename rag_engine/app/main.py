@@ -11,9 +11,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app import __version__
 from app.config import Settings, get_settings
@@ -24,13 +24,18 @@ from app.ingestion.indexer import Indexer
 from app.pipeline import RAGService
 from app.retrieval.dense import DenseRetriever, get_vector_store
 from app.retrieval.embeddings import get_embedder
+from app.retrieval.find import find_files
 from app.retrieval.reranker import CrossEncoderReranker
 from app.retrieval.sparse import SparseIndexBase, get_sparse_index
 from app.schemas.eval import EvalReport, EvalRunRequest
+from app.schemas.find import FindResponse, OpenFileRequest
 from app.schemas.ingestion import IngestResponse, IndexStatus
 from app.schemas.query import QueryRequest, QueryResponse
 from app.utils.errors import RAGError
 from app.utils.security import RateLimiter, client_key, require_api_key
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 logger = logging.getLogger("rag_engine")
 
@@ -224,7 +229,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         )
 
     @app.get("/", include_in_schema=False)
-    async def root() -> dict[str, str]:
+    async def root(http_request: Request):
+        app_ctx: AppContext = http_request.app.state.ctx
+        if app_ctx.settings.profile == "local":
+            index_path = _STATIC_DIR / "index.html"
+            if index_path.exists():
+                return HTMLResponse(content=index_path.read_text(encoding="utf-8"))
         return {"service": "rag-engine", "docs": "/docs", "health": "/health"}
 
     @app.post(
@@ -291,6 +301,63 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     async def ask(http_request: Request, request: QueryRequest) -> QueryResponse:
         app_ctx: AppContext = http_request.app.state.ctx
         return await app_ctx.rag.ask(request)
+
+    @app.get(
+        "/v1/find",
+        response_model=FindResponse,
+        tags=["Query"],
+        summary="Fast filename-boosted file search: dense + sparse, RRF-fused, no rerank/LLM",
+        dependencies=protected,
+    )
+    async def find(
+        http_request: Request,
+        q: str = Query(min_length=1, max_length=4000, description="Search text"),
+    ) -> FindResponse:
+        app_ctx: AppContext = http_request.app.state.ctx
+        started = time.perf_counter()
+        hits = await find_files(app_ctx.dense, app_ctx.sparse, app_ctx.settings, q)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        return FindResponse(query=q, results=hits, latency_ms=elapsed_ms)
+
+    if resolved_settings.profile == "local":
+
+        @app.post(
+            "/v1/open",
+            tags=["Local"],
+            summary="Local mode only: open an indexed file with the OS default handler",
+            dependencies=protected,
+        )
+        async def open_file(http_request: Request, request: OpenFileRequest) -> JSONResponse:
+            app_ctx: AppContext = http_request.app.state.ctx
+            if client_key(http_request) not in _LOOPBACK_HOSTS:
+                # Defense in depth: profile=local implies api_host=127.0.0.1 by
+                # default, but that's a separate, independently overridable setting
+                # — never shell-open a file for a caller that isn't actually local.
+                raise HTTPException(status_code=403, detail="This endpoint only accepts local requests")
+
+            get_file_record = getattr(app_ctx.sparse, "get_file_record", None)
+            if get_file_record is None or get_file_record(request.path) is None:
+                # Restricting to files the crawler already indexed (and therefore
+                # already ran through excluded_patterns/size filtering) keeps this
+                # from being usable as an arbitrary local file/app launcher.
+                raise HTTPException(status_code=404, detail="Path is not a currently indexed file")
+
+            import platform
+            import subprocess
+
+            system = platform.system()
+            try:
+                if system == "Darwin":
+                    subprocess.run(["open", request.path], check=False)
+                elif system == "Windows":
+                    import os
+
+                    os.startfile(request.path)  # type: ignore[attr-defined]
+                else:
+                    subprocess.run(["xdg-open", request.path], check=False)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Could not open file: {exc}") from exc
+            return JSONResponse(status_code=200, content={"opened": request.path})
 
     @app.post(
         "/v1/evaluate",

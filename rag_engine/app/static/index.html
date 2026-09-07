@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Local Search</title>
+<style>
+  body {
+    margin: 0;
+    padding: 2rem 1.5rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: #fafafa;
+    color: #222;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  input[type="search"] {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.6rem 0.8rem;
+    font-size: 1rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+  }
+  #status { margin: 0.5rem 0 1rem; font-size: 0.85rem; color: #777; min-height: 1.1em; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    border: 1px solid #e3e3e3;
+    border-radius: 6px;
+    padding: 0.6rem 0.8rem;
+    margin-bottom: 0.5rem;
+    background: #fff;
+  }
+  .row1 { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+  .filename { font-weight: 600; }
+  .folder { color: #888; font-size: 0.8rem; word-break: break-all; }
+  .snippet { margin: 0.35rem 0; font-size: 0.9rem; color: #444; }
+  .meta { display: flex; justify-content: space-between; align-items: center; }
+  .mtime { color: #999; font-size: 0.78rem; }
+  button.open {
+    font-size: 0.8rem;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #f2f2f2;
+    cursor: pointer;
+  }
+  button.open:hover { background: #e6e6e6; }
+  button.open:disabled { opacity: 0.5; cursor: default; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <input id="q" type="search" placeholder="Search your files…" autofocus autocomplete="off">
+  <div id="status"></div>
+  <ul id="results"></ul>
+</div>
+<script>
+(function () {
+  var input = document.getElementById('q');
+  var status = document.getElementById('status');
+  var list = document.getElementById('results');
+  var debounceTimer = null;
+  var currentController = null;
+
+  function fmtTime(mtime) {
+    if (!mtime) return '';
+    return new Date(mtime * 1000).toLocaleString();
+  }
+
+  function basename(path) {
+    var parts = path.split(/[\\/]/);
+    return parts[parts.length - 1] || path;
+  }
+
+  function dirname(path) {
+    var idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+    return idx >= 0 ? path.slice(0, idx) : '';
+  }
+
+  function render(results) {
+    list.innerHTML = '';
+    if (!results.length) {
+      status.textContent = 'No matches.';
+      return;
+    }
+    results.forEach(function (hit) {
+      var li = document.createElement('li');
+
+      var row1 = document.createElement('div');
+      row1.className = 'row1';
+      var name = document.createElement('span');
+      name.className = 'filename';
+      name.textContent = basename(hit.path);
+      row1.appendChild(name);
+      row1.appendChild(document.createTextNode(''));
+      li.appendChild(row1);
+
+      var folder = document.createElement('div');
+      folder.className = 'folder';
+      folder.textContent = dirname(hit.path);
+      li.appendChild(folder);
+
+      var snippet = document.createElement('div');
+      snippet.className = 'snippet';
+      snippet.textContent = hit.snippet;
+      li.appendChild(snippet);
+
+      var meta = document.createElement('div');
+      meta.className = 'meta';
+      var mtime = document.createElement('span');
+      mtime.className = 'mtime';
+      mtime.textContent = fmtTime(hit.mtime);
+      meta.appendChild(mtime);
+
+      var openBtn = document.createElement('button');
+      openBtn.className = 'open';
+      openBtn.textContent = 'Open';
+      openBtn.addEventListener('click', function () {
+        openBtn.disabled = true;
+        openBtn.textContent = 'Opening…';
+        fetch('/v1/open', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: hit.path })
+        }).then(function (resp) {
+          openBtn.disabled = false;
+          openBtn.textContent = resp.ok ? 'Open' : 'Failed';
+          if (resp.ok) {
+            setTimeout(function () { openBtn.textContent = 'Open'; }, 1500);
+          }
+        }).catch(function () {
+          openBtn.disabled = false;
+          openBtn.textContent = 'Failed';
+        });
+      });
+      meta.appendChild(openBtn);
+      li.appendChild(meta);
+
+      list.appendChild(li);
+    });
+  }
+
+  function search(query) {
+    if (currentController) currentController.abort();
+    if (!query.trim()) {
+      list.innerHTML = '';
+      status.textContent = '';
+      return;
+    }
+    currentController = new AbortController();
+    status.textContent = 'Searching…';
+    fetch('/v1/find?q=' + encodeURIComponent(query), { signal: currentController.signal })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('search failed (' + resp.status + ')');
+        return resp.json();
+      })
+      .then(function (data) {
+        status.textContent = data.results.length + ' result(s) in ' + data.latency_ms.toFixed(0) + ' ms';
+        render(data.results);
+      })
+      .catch(function (err) {
+        if (err.name === 'AbortError') return;
+        status.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  input.addEventListener('input', function () {
+    clearTimeout(debounceTimer);
+    var value = input.value;
+    debounceTimer = setTimeout(function () { search(value); }, 200);
+  });
+})();
+</script>
+</body>
+</html>

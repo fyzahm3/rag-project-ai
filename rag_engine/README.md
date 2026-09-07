@@ -56,6 +56,8 @@ The compose file mounts `./data` for ChromaDB persistence + reports, runs the se
 | `/v1/ingest` | POST | Multipart upload (`.pdf`, `.md`, `.txt`, `.html`) + optional `strategy` form field (`fixed`\|`structure`\|`semantic`). Parses → chunks → dedups → dual-indexes. |
 | `/v1/ask` | POST | Full pipeline with ms telemetry: `{query, top_k, enable_reranking}` → answer, citations, confidence, verification report. |
 | `/v1/evaluate` | POST | Runs the benchmark harness over a golden JSONL dataset; returns Recall@K, MRR, faithfulness per strategy; persists JSON + Markdown artifacts. |
+| `/v1/find?q=` | GET | Fast file search: dense ∥ sparse (no rerank, no LLM), filename/path matches boosted heavily. Returns `{path, snippet, score, mtime}[]`. Works under both profiles; the filename boost is FTS5-only (local profile) and degrades to a plain content search on BM25 (server profile). |
+| `/v1/open` | POST | **Local profile only.** `{path}` → opens that file with the OS default handler. Loopback-only (403 otherwise) and restricted to files the crawler has actually indexed (404 otherwise) — not a general local file/app launcher. |
 | `/health` | GET | Index status (chunk counts), embedding model/dim, reranker & LLM readiness. |
 
 ```bash
@@ -120,6 +122,13 @@ On first run this generates a commented, editable config file — open it, uncom
 something to index even before you edit it.) Click the tray icon → **Search…** for a
 small always-on-top window: type a query, press Enter, double-click a result to open
 the source file in its default app.
+
+The same search is also available as a plain web page — the daemon runs a FastAPI
+server under the hood purely to serve it, at `http://127.0.0.1:8000` by default. Open
+it in a browser for a one-box, as-you-type search (`app/static/index.html`, vanilla
+JS, no build step) hitting `GET /v1/find`; each result has an **Open** button that
+calls `POST /v1/open` to launch the file. `GET /` only serves this page under
+`PROFILE=local` — under the server profile it's unchanged (a small JSON status blob).
 
 ### What's different under `PROFILE=local`
 

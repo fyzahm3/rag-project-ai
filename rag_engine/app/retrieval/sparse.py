@@ -43,6 +43,9 @@ class SparseIndexBase(Protocol):
     async def query(self, query: str, top_k: int) -> list[RetrievedRecord]:
         ...
 
+    async def find(self, query: str, top_k: int) -> list[RetrievedRecord]:
+        ...
+
     def count(self) -> int:
         ...
 
@@ -150,6 +153,11 @@ class BM25SparseIndex:
 
         return await asyncio.to_thread(self.query_sync, query, top_k)
 
+    async def find(self, query: str, top_k: int) -> list[RetrievedRecord]:
+        """/v1/find fallback for the server profile: BM25 has no filename/path
+        column concept, so this is a plain content search — no filename boost."""
+        return await self.query(query, top_k)
+
     def count(self) -> int:
         with self._lock:
             return len(self._entries)
@@ -183,16 +191,29 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     section_heading UNINDEXED,
     page UNINDEXED,
     strategy UNINDEXED,
+    filename,
+    path_tokens,
     content
 );
 """
+
+# bm25() weight args are positional over ALL declared columns, including UNINDEXED
+# ones, which still need a placeholder (0 below) — SQLite silently mis-assigns
+# weights to the wrong column if the count is short, rather than erroring, so the
+# 8 args below must match chunks_fts's 8 declared columns exactly.
+# /v1/find: filename match should almost always outrank a body-only match; a path
+# segment match (e.g. a folder name) is a real but weaker signal.
+_FIND_FILENAME_WEIGHT = 8.0
+_FIND_PATH_WEIGHT = 3.0
+_FIND_CONTENT_WEIGHT = 1.0
 
 
 class FTS5SparseIndex:
     """SQLite FTS5 sparse index (local profile). Same query/add/remove/count surface
     as BM25SparseIndex, plus a `files` table (path/mtime/size/content_hash/indexed_at)
-    that local-mode file watching can use to skip re-indexing unchanged files, and a
-    doc-path-prefix delete for dropping every chunk under a removed watched folder.
+    that local-mode file watching can use to skip re-indexing unchanged files, a
+    doc-path-prefix delete for dropping every chunk under a removed watched folder,
+    and filename/path-boosted search for /v1/find (see find_sync).
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -203,6 +224,23 @@ class FTS5SparseIndex:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_FTS5_SCHEMA)
         self._conn.commit()
+        self._migrate_schema_if_needed()
+
+    def _migrate_schema_if_needed(self) -> None:
+        """CREATE ... IF NOT EXISTS won't add columns to an existing (older) table.
+        This index is a derived cache of the watched files, so on a schema mismatch
+        it's simplest and safest to rebuild it — a full re-crawl (which the caller
+        triggers by nature of `files` also being empty afterward) repopulates it."""
+        try:
+            self._conn.execute("SELECT filename, path_tokens FROM chunks_fts LIMIT 1")
+        except sqlite3.OperationalError:
+            logger.warning(
+                "FTS5 schema at %s predates filename/path search; rebuilding the "
+                "sparse index (a full re-crawl will repopulate it)", self.db_path
+            )
+            self._conn.executescript("DROP TABLE IF EXISTS chunks_fts; DROP TABLE IF EXISTS files;")
+            self._conn.executescript(_FTS5_SCHEMA)
+            self._conn.commit()
 
     # -- chunk index ---------------------------------------------------------
 
@@ -220,14 +258,16 @@ class FTS5SparseIndex:
                     continue
                 cur.execute(
                     "INSERT INTO chunks_fts "
-                    "(chunk_id, doc_path, section_heading, page, strategy, content) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(chunk_id, doc_path, section_heading, page, strategy, filename, "
+                    "path_tokens, content) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record.chunk_id,
                         record.document_name,
                         record.section_heading,
                         record.page,
                         record.strategy,
+                        Path(record.document_name).name,
+                        record.document_name,
                         record.text,
                     ),
                 )
@@ -280,6 +320,54 @@ class FTS5SparseIndex:
 
         return await asyncio.to_thread(self.query_sync, query, top_k)
 
+    def find_sync(self, query: str, top_k: int) -> list[RetrievedRecord]:
+        """/v1/find: unqualified MATCH across filename, path_tokens *and* content —
+        unlike query_sync (content-only, used by /v1/ask) — with filename matches
+        weighted far above path matches, which are weighted above body matches.
+        Prefix matching (`token*`) so a partially-typed filename still hits."""
+        if top_k <= 0:
+            return []
+        tokens = tokenize(query)
+        if not tokens:
+            return []
+        match_query = " OR ".join(f"{token}*" for token in tokens)
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT chunk_id, doc_path, section_heading, page, strategy, content, "
+                    "bm25(chunks_fts, 0, 0, 0, 0, 0, ?, ?, ?) AS rank "
+                    "FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                    (_FIND_FILENAME_WEIGHT, _FIND_PATH_WEIGHT, _FIND_CONTENT_WEIGHT, match_query, top_k),
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                logger.warning("FTS5 find query failed for %r: %s", query, exc)
+                return []
+        if not rows:
+            return []
+        inverted = [-row[6] for row in rows]
+        max_score = max(inverted) if inverted else 0.0
+        results: list[RetrievedRecord] = []
+        for row, inv in zip(rows, inverted):
+            chunk_id, doc_path, heading, page, strategy, content, _rank = row
+            results.append(
+                RetrievedRecord(
+                    chunk_id=chunk_id,
+                    text=content,
+                    document_name=doc_path,
+                    section_heading=heading or "(untitled)",
+                    page=page,
+                    strategy=strategy or "structure",
+                    score=(inv / max_score) if max_score > 0 else 0.0,
+                    raw_score=inv,
+                )
+            )
+        return results
+
+    async def find(self, query: str, top_k: int) -> list[RetrievedRecord]:
+        import asyncio
+
+        return await asyncio.to_thread(self.find_sync, query, top_k)
+
     def count(self) -> int:
         with self._lock:
             return int(self._conn.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0])
@@ -318,7 +406,10 @@ class FTS5SparseIndex:
             return ""
         # OR (not FTS5's default AND) so partial term overlap still ranks via bm25(),
         # matching BM25Okapi's behavior rather than requiring every term present.
-        return " OR ".join(f'"{token}"' for token in tokens)
+        # Scoped to `content:` so adding the filename/path_tokens columns (for
+        # /v1/find) can't change what this — /v1/ask's sparse retrieval — matches.
+        or_expr = " OR ".join(f'"{token}"' for token in tokens)
+        return f"content: ({or_expr})"
 
     # -- file tracking (for skip-if-unchanged re-indexing) -------------------
 

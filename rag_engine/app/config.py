@@ -123,6 +123,14 @@ class Settings(BaseSettings):
     rrf_dense_weight: float = Field(default=0.7, gt=0.0)
     rrf_sparse_weight: float = Field(default=0.3, gt=0.0)
 
+    # GET /v1/find: dense ∥ sparse only, no rerank/LLM. Sparse carries the
+    # filename/path-boosted signal (see FTS5SparseIndex.find_sync), so it's weighted
+    # above dense here — the opposite of rrf_dense_weight/rrf_sparse_weight above.
+    find_top_k: int = Field(default=20, ge=1)
+    find_result_limit: int = Field(default=20, ge=1)
+    find_dense_weight: float = Field(default=0.4, gt=0.0)
+    find_sparse_weight: float = Field(default=0.6, gt=0.0)
+
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     warm_models: bool = True
 
