@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.local.config_yaml import load_local_yaml_overrides, write_default_local_config
+from app.local.config_yaml import (
+    load_local_yaml_overrides,
+    render_config_yaml,
+    write_default_local_config,
+)
 
 
 def test_generates_default_config_on_first_run(tmp_path: Path):
@@ -58,6 +62,28 @@ def test_ignores_null_values_and_malformed_yaml(tmp_path: Path):
     bad_path = tmp_path / "bad.yaml"
     bad_path.write_text("watched_paths: [unclosed\n", encoding="utf-8")
     assert load_local_yaml_overrides(bad_path) == {}
+
+
+def test_render_config_yaml_writes_user_chosen_paths_active_not_commented():
+    content = render_config_yaml(watched_paths=["/Users/me/Projects", "/Users/me/Notes"])
+    assert "watched_paths:\n  - /Users/me/Projects\n  - /Users/me/Notes" in content
+    assert "~/Documents" not in content  # user's picks replace the default, not append
+
+
+def test_render_config_yaml_falls_back_to_default_paths_when_none_given():
+    content = render_config_yaml()
+    assert "watched_paths:\n  - ~/Documents\n  - ~/Desktop" in content
+
+
+def test_wizard_writes_config_with_user_chosen_paths_that_parse_as_overrides(tmp_path: Path):
+    """The first-run wizard's write path (write_default_local_config with explicit
+    watched_paths) must round-trip through the normal YAML loader like any other
+    config.yaml, since that's how first_run.py and get_settings() consume it."""
+    config_path = tmp_path / "config.yaml"
+    write_default_local_config(config_path, watched_paths=["/data/one", "/data/two"])
+
+    overrides = load_local_yaml_overrides(config_path)
+    assert overrides["watched_paths"] == ["/data/one", "/data/two"]
 
 
 def test_overrides_feed_directly_into_settings(tmp_path: Path):

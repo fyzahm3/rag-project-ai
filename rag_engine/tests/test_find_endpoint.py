@@ -122,6 +122,28 @@ def test_find_files_dedupes_by_path_and_builds_snippets(tmp_path: Path):
     assert hits[0].mtime is None or isinstance(hits[0].mtime, float)
 
 
+def test_find_files_rrf_lets_a_filename_match_outrank_a_denser_semantic_match(tmp_path: Path):
+    """Small fixture index exercising the full /v1/find path: dense and sparse
+    (filename-boosted) results get RRF-fused, not just sparse ranked alone. A file
+    whose *name* matches the query should win even against a competing file whose
+    *body* is a closer semantic match, because find_sparse_weight favors the
+    filename-boosted sparse list over the dense one for this endpoint."""
+    settings, embedder, store, sparse, dense, indexer = _local_components(tmp_path)
+    # HashingEmbedder makes near-duplicate text hash into similar vectors, so an
+    # almost word-for-word body gives this doc a strong (but filename-irrelevant)
+    # dense match against the query text below.
+    asyncio.run(indexer.ingest(
+        "/docs/unrelated_notes.md",
+        b"launch window opens closes UTC schedule timing procedure",
+    ))
+    asyncio.run(indexer.ingest("/docs/launch_window.md", SAMPLE_A.encode("utf-8")))
+
+    hits = asyncio.run(find_files(dense, sparse, settings, "launch window"))
+    paths = [h.path for h in hits]
+    assert "/docs/launch_window.md" in paths
+    assert paths.index("/docs/launch_window.md") < paths.index("/docs/unrelated_notes.md")
+
+
 def test_fts5_schema_migration_rebuilds_old_database(tmp_path: Path):
     db_path = tmp_path / "old.sqlite3"
     old_schema = """

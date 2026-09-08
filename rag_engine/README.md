@@ -27,7 +27,12 @@ End-to-end Retrieval-Augmented Generation system: **Hybrid Search → Reciprocal
 
 ## Quickstart
 
-### Local (Python 3.11+)
+Two independent ways to run this: a server for the portfolio/eval-harness demo, or
+a local daemon for day-to-day file search on your own machine. Same codebase, picked
+by a config profile — see [Local mode](#local-mode-tray-daemon) below for how that
+works under the hood.
+
+### Portfolio / server demo (Docker)
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -40,14 +45,115 @@ uvicorn app.main:app --reload         # http://localhost:8000/docs
 
 > Default embedding provider is local HuggingFace (`all-MiniLM-L6-v2`), so the stack runs **without any API key** — generation falls back to deterministic extractive answering and verification to a lexical entailment heuristic. Set `EMBEDDING_PROVIDER=openai` + `OPENAI_API_KEY` for full LLM quality end-to-end. If you change providers, wipe `data/chroma` (embedding dimensions differ).
 
-### Docker
-
 ```bash
 docker compose up --build
 curl localhost:8000/health
 ```
 
 The compose file mounts `./data` for ChromaDB persistence + reports, runs the seed script on first boot (`--if-empty`), and ships a container-level healthcheck with a long start period for model downloads.
+
+### Local daily-use file search (macOS or Windows)
+
+Fast hybrid search (dense + keyword, filename-boosted) over your own files, running
+entirely on your machine — no server to deploy, no cloud calls, unless you opt into
+OpenAI for the synthesized-answer path. A tray icon watches folders you choose and
+keeps them indexed in the background.
+
+**Is my data private?** Yes, by default: crawling, indexing, embeddings and search
+all run locally, and your files never leave the machine. The one exception is if you
+set `OPENAI_API_KEY` — then, only for `POST /v1/ask` (the synthesized-answer path,
+not plain file search), the query and the *retrieved snippets* relevant to it are
+sent to OpenAI's API, the same way any OpenAI-backed app would. Leave it unset (the
+default) and generation runs on a local Ollama model, or an extractive fallback with
+no model call at all.
+
+**Prerequisites:** Python 3.11+. Ollama is optional — install it for a real
+synthesized answer from a local model, or skip it and either set `OPENAI_API_KEY` or
+just use plain file search (`/v1/find`), which needs neither.
+
+macOS:
+```bash
+git clone https://github.com/fyzahm3/rag-project-ai.git
+cd rag-project-ai/rag_engine
+./scripts/setup.sh
+python app/tray.py
+```
+
+Windows (PowerShell):
+```powershell
+git clone https://github.com/fyzahm3/rag-project-ai.git
+cd rag-project-ai\rag_engine
+.\scripts\setup.ps1
+python app\tray.py
+```
+
+`setup.sh`/`setup.ps1` check your Python version, create a venv, install
+`requirements-local.txt`, check for Ollama, then walk you through a first-run wizard:
+which folders to index (defaults to Documents/Desktop), and an initial crawl with
+progress logged as it goes. `python app/tray.py` starts it — a tray/menu-bar icon
+appears; click **Open Search** for the web UI.
+
+**Config file** — add/remove watched folders here any time (edit, then choose
+**Reindex now** from the tray menu, or restart):
+- macOS: `~/Library/Application Support/RagSearch/config.yaml`
+- Windows: `%LOCALAPPDATA%\RagSearch\config.yaml`
+
+**Auto-start on login (optional)** — off by default; run `scripts/install_macos.sh`
+or `scripts/install_windows.ps1` yourself when you want it (see
+[Run at login](#run-at-login-optional) below for exactly what each does and how to
+undo it).
+
+**How it works:**
+
+```
+                        ┌──────────────────────────────────────────────────────┐
+ Local files ──────►    │ Crawler + watcher (app/ingestion/watcher.py)         │
+ (watched_paths)        │  stat-diff ─► parse ─► chunk ─► dedup ─► dual-index  │
+                        └──────────────┬───────────────────────┬───────────────┘
+                                       ▼                       ▼
+                              ChromaDB (cosine)      SQLite FTS5 (bm25 + filename boost)
+                                       └─────────┬─────────────┘
+                                                 ▼
+                        ┌──────────────────────────────────────────────────────┐
+ GET  /v1/find ────────►│ Fast path: dense@20 ∥ sparse@20 ─► RRF ─► dedup/path │  no rerank, no LLM
+                        └──────────────────────────────────────────────────────┘
+                        ┌──────────────────────────────────────────────────────┐
+ POST /v1/ask ─────────►│ Full path: same retrieval ─► rerank ─► generate      │
+                        │   (Ollama, or OpenAI if OPENAI_API_KEY is set)       │
+                        │   ─► citation verification                           │
+                        └──────────────────────────────────────────────────────┘
+```
+
+**Troubleshooting:**
+- **Port already in use** — local mode binds `127.0.0.1:8787` by default (distinct
+  from the server profile's `8000`, so both could in principle run at once). Change
+  it via `api_port:` in `config.yaml`, or find what's using it: `lsof -i :8787`
+  (macOS) / `netstat -ano | findstr :8787` (Windows).
+- **Ollama not found** — either install it (https://ollama.com) and
+  `ollama pull qwen2.5:7b`, or set `OPENAI_API_KEY`, or do neither: `/v1/find` file
+  search doesn't need a generation model at all, and `/v1/ask` falls back to an
+  extractive (non-LLM) answer.
+- **Permission errors watching protected folders** — the crawler logs a warning and
+  skips a file/folder it can't read rather than crashing; remove that path from
+  `watched_paths`, or (macOS) grant your terminal/Python Full Disk Access under
+  System Settings → Privacy & Security.
+- **Force a full reindex** — tray menu → **Reindex now** (re-scans on demand without
+  waiting for the live watcher); to force *every* file to be treated as new rather
+  than skipped as unchanged, delete `index/fts5_index.sqlite3` and `chroma/` in the
+  app data dir (below) first.
+- **Uninstall** — if you ran an auto-start installer, undo it first (its own output
+  told you the exact command — `launchctl unload`/`rm` the plist, or
+  `Unregister-ScheduledTask`); then delete the app data dir
+  (`~/Library/Application Support/RagSearch` / `%LOCALAPPDATA%\RagSearch`) and the
+  repo/`.venv`.
+
+**Packaged app (optional)** — running from source (above) is the primary,
+recommended path. For a double-clickable binary instead:
+`pip install pyinstaller && pyinstaller packaging/tray.spec` builds a `RagSearch.app`
+(macOS) or `RagSearch/` folder with `RagSearch.exe` (Windows) under `dist/` — see
+that spec file's own docstring for what it bundles and its one prerequisite (run
+from source once first so the embedding model is cached, if you want it bundled
+rather than downloaded on first launch).
 
 ## API
 
@@ -89,46 +195,10 @@ the folder crawler/watcher in another, and shows a tray/menu-bar icon with:
 - **Open config file** — opens `config.yaml` in your default text editor
 - **Quit** — stops the watcher and the server cleanly
 
-### macOS — copy-paste setup
-
-```bash
-git clone https://github.com/fyzahm3/rag-project-ai.git
-cd rag-project-ai/rag_engine
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r requirements-local.txt
-
-# optional: local generation via Ollama instead of the extractive fallback
-brew install ollama && ollama pull qwen2.5:7b
-
-export PROFILE=local
-python scripts/run_local_daemon.py
-```
-
-### Windows (PowerShell) — copy-paste setup
-
-```powershell
-git clone https://github.com/fyzahm3/rag-project-ai.git
-cd rag-project-ai\rag_engine
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt -r requirements-local.txt
-
-# optional: local generation via Ollama instead of the extractive fallback
-winget install Ollama.Ollama
-ollama pull qwen2.5:7b
-
-$env:PROFILE = "local"
-python scripts\run_local_daemon.py
-```
-
-On first run this generates a commented, editable config file — open it, uncomment
-`watched_paths`, point it at your folders, and restart:
-
-- macOS: `~/Library/Application Support/RagSearch/config.yaml`
-- Windows: `%LOCALAPPDATA%\RagSearch\config.yaml`
-
-(Its default already watches `~/Documents` and `~/Desktop`, so the daemon has
-something to index even before you edit it.)
+Setup, prerequisites, and the config file's location are in
+[Quickstart → Local daily-use file search](#local-daily-use-file-search-macos-or-windows)
+above — this section is the deeper reference for what's actually different under
+`PROFILE=local` and why.
 
 ### Minimal local web UI
 
@@ -167,9 +237,10 @@ Any of these can be overridden explicitly (env var, `.env`, or a value in
 Ollama, app-data paths) and only swaps the embedding backend.
 
 Notes:
-- `requirements-local.txt` (watchdog, pystray, Pillow, PyYAML) is separate from
-  `requirements.txt` so the server/Docker image is completely untouched by any of
-  this — verify with `git diff` against a clean checkout that `Dockerfile`,
+- `requirements-local.txt` is a standalone requirements file (not layered on top of
+  `requirements.txt`) — slimmer than the Docker/server one (no `rank-bm25`, no
+  unused `instructor`) — so the server/Docker image is completely untouched by any
+  of this. Verify with `git diff` against a clean checkout that `Dockerfile`,
   `docker-compose.yml`, and `requirements.txt` are unchanged by local mode.
 - The evaluation harness (`/v1/evaluate`, `scripts/seed_data.py`) always runs under
   the server profile's BM25 sparse index, so Recall@K/MRR benchmark numbers stay

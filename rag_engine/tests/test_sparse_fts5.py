@@ -103,6 +103,42 @@ def test_remove_by_path_prefix(tmp_path: Path):
     assert remaining[0].document_name == "/docs/project_b/one.md"
 
 
+def test_incremental_update_replaces_content_not_appends(tmp_path: Path):
+    """The FTS5 index itself has no 'UPDATE a chunk's text' operation — the
+    incremental-update pattern used throughout this codebase (IndexSyncer included)
+    is remove-then-reinsert for the same document, and search must reflect only the
+    new content afterward, never both."""
+    index = FTS5SparseIndex(tmp_path / "fts5.sqlite3")
+    index.add_documents([_record("c1", "/docs/a.md", "the original launch time is 0900")])
+    assert index.query_sync("0900", top_k=5)
+
+    index.remove_by_document("/docs/a.md")
+    index.add_documents([_record("c1-v2", "/docs/a.md", "the revised launch time is 1400")])
+
+    # "0900" only ever existed in the removed version — an OR-token match on it
+    # must find nothing now, not a low-scored leftover.
+    stale = index.query_sync("0900", top_k=5)
+    assert stale == []
+    fresh = index.query_sync("1400", top_k=5)
+    assert len(fresh) == 1
+    assert fresh[0].chunk_id == "c1-v2"
+
+
+def test_list_file_paths_under_prefix(tmp_path: Path):
+    index = FTS5SparseIndex(tmp_path / "fts5.sqlite3")
+    index.upsert_file_record("/docs/project_a/one.md", mtime=1.0, size=1, content_hash="h1")
+    index.upsert_file_record("/docs/project_a/two.md", mtime=1.0, size=1, content_hash="h2")
+    index.upsert_file_record("/docs/project_b/one.md", mtime=1.0, size=1, content_hash="h3")
+
+    under_a = index.list_file_paths_under("/docs/project_a")
+    assert set(under_a) == {"/docs/project_a/one.md", "/docs/project_a/two.md"}
+
+    under_everything = index.list_file_paths_under("/docs")
+    assert len(under_everything) == 3
+
+    assert index.list_file_paths_under("/docs/nonexistent") == []
+
+
 def test_file_record_upsert_and_get(tmp_path: Path):
     index = FTS5SparseIndex(tmp_path / "fts5.sqlite3")
     assert index.get_file_record("/docs/a.md") is None

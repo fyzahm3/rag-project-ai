@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import platform
 import subprocess
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -27,6 +29,18 @@ from app.ingestion.watcher import FolderWatcher, IndexSyncer
 from app.main import AppContext, build_context, configure_logging, create_app
 
 logger = logging.getLogger("rag_engine.tray")
+
+
+def _configure_frozen_environment() -> None:
+    """When running as a packaged app (see packaging/tray.spec), point Hugging
+    Face's cache at the model bundled alongside the executable, if present, so a
+    bundled embedding model is actually found instead of re-downloaded."""
+    if getattr(sys, "frozen", False):
+        bundle_dir = Path(getattr(sys, "_MEIPASS", "."))
+        hf_cache = bundle_dir / "hf_cache"
+        if hf_cache.exists():
+            os.environ.setdefault("HF_HOME", str(hf_cache))
+            logger.info("Using bundled model cache: %s", hf_cache)
 
 
 def _open_in_default_app(path: Path) -> None:
@@ -138,6 +152,7 @@ def _build_icon_image():
 
 
 def main() -> int:
+    _configure_frozen_environment()
     settings = get_settings()
     if settings.profile != "local":
         raise SystemExit(

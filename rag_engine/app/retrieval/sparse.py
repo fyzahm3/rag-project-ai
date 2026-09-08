@@ -434,6 +434,17 @@ class FTS5SparseIndex:
             return None
         return {"path": row[0], "mtime": row[1], "size": row[2], "content_hash": row[3], "indexed_at": row[4]}
 
+    def list_file_paths_under(self, prefix: str) -> list[str]:
+        """Every previously-indexed path under `prefix` — used by a fresh crawl to
+        find files that vanished while the daemon wasn't watching (the live watcher
+        only sees deletions that happen while it's actually running)."""
+        pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT path FROM files WHERE path LIKE ? ESCAPE '\\'", (pattern,)
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

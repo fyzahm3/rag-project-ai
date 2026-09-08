@@ -1,15 +1,46 @@
-# Extra dependencies for local (tray daemon) mode only — not needed by, and not
-# installed into, the server/Docker deployment. Install alongside requirements.txt:
-#   pip install -r requirements.txt -r requirements-local.txt
+# Standalone requirements for local (tray daemon) mode — NOT layered on top of
+# requirements.txt. Slimmer than the Docker/server requirements: no rank-bm25 (local
+# mode's sparse backend is SQLite FTS5, stdlib `sqlite3`) and no `instructor` (unused
+# anywhere in this codebase). Everything else the local daemon actually touches —
+# its own small FastAPI server for /v1/find, /v1/open and the web UI, on-device
+# embeddings/reranking, Chroma, document parsing — is included below.
 #
-# tkinter (the search window) ships with the standard CPython installer on macOS and
-# Windows, so it isn't listed here — nothing to pip-install for it on those platforms.
+# Install with:
+#   pip install -r requirements-local.txt
 
+# Core API (the tray app runs its own small FastAPI/uvicorn server)
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+httpx==0.27.0
+
+# Config & validation
+pydantic==2.7.0
+pydantic-settings==2.3.0
+PyYAML==6.0.1
+
+# Generation: talks to Ollama (default) via its OpenAI-compatible endpoint, or to
+# OpenAI directly if OPENAI_API_KEY is set — same client either way.
+openai==1.35.0
+
+# Vector store (default backend; local mode persists it under the per-OS app data dir)
+chromadb==0.5.3
+
+# ML runtime for on-device embeddings + cross-encoder reranking/NLI verification
+# (CPU wheels; local mode auto-detects mps/cuda/cpu at the torch level)
+torch==2.2.0
+sentence-transformers==3.0.0
+transformers==4.41.0
+
+# Document parsing
+pymupdf==1.24.0
+beautifulsoup4==4.12.0
+Markdown==3.6
+
+# Numeric
+numpy==1.26.0
+
+# Local-mode-specific: folder crawling/watching, tray icon
 watchdog==4.0.1
 pystray==0.19.5
 Pillow==10.3.0
-PyYAML==6.0.1
-
-# Generation: Ollama itself is a separate install (https://ollama.com), not a pip
-# package — the local daemon talks to it over HTTP via Ollama's OpenAI-compatible
-# endpoint, reusing the `openai` package already in requirements.txt.

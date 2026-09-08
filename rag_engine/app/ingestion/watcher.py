@@ -39,6 +39,7 @@ class CrawlStats:
     indexed: int = 0
     skipped: int = 0
     errors: int = 0
+    removed: int = 0
 
 
 class IndexSyncer:
@@ -129,14 +130,18 @@ class IndexSyncer:
         return bool(removed)
 
     async def crawl(self, roots: list[Path]) -> CrawlStats:
-        """Walk every root, indexing new/changed files and skipping unchanged ones.
-        Launches indexing concurrently (bounded by max_concurrent_indexing) as files
-        are discovered, rather than walking-then-indexing in two separate phases, so
-        progress is visible throughout a long first-run crawl rather than all at once
-        at the end."""
+        """Walk every root, indexing new/changed files, skipping unchanged ones, and
+        pruning files that vanished since the last crawl (the live watcher only
+        catches a deletion that happens while it's actually running — a fresh crawl
+        is what notices one that happened while the daemon was off). Launches
+        indexing concurrently (bounded by max_concurrent_indexing) as files are
+        discovered, rather than walking-then-indexing in two separate phases, so
+        progress is visible throughout a long first-run crawl rather than all at
+        once at the end."""
         stats = CrawlStats()
         pending: set[asyncio.Task] = set()
         backpressure_limit = self.max_concurrent_indexing * 4
+        seen_paths: set[str] = set()
 
         for root in roots:
             if not root.exists():
@@ -146,6 +151,7 @@ class IndexSyncer:
                 if not path.is_file() or is_excluded(path, self.excluded_patterns):
                     continue
                 stats.scanned += 1
+                seen_paths.add(str(path.resolve()))
                 pending.add(asyncio.create_task(self._crawl_one(path, stats)))
                 if len(pending) >= backpressure_limit:
                     _done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
@@ -157,11 +163,29 @@ class IndexSyncer:
         if pending:
             await asyncio.wait(pending)
 
+        stats.removed = self._prune_vanished_files(roots, seen_paths)
+
         logger.info(
-            "Crawl complete: %d scanned, %d indexed, %d skipped, %d errors",
-            stats.scanned, stats.indexed, stats.skipped, stats.errors,
+            "Crawl complete: %d scanned, %d indexed, %d skipped, %d removed, %d errors",
+            stats.scanned, stats.indexed, stats.skipped, stats.removed, stats.errors,
         )
         return stats
+
+    def _prune_vanished_files(self, roots: list[Path], seen_paths: set[str]) -> int:
+        """Compare what the sparse index already knows about under each root
+        against what this crawl actually found, and drop entries for anything
+        that's gone missing. A no-op for backends without file tracking
+        (BM25SparseIndex, i.e. server profile)."""
+        list_known = getattr(self.indexer.sparse_index, "list_file_paths_under", None)
+        if list_known is None:
+            return 0
+        removed = 0
+        for root in roots:
+            for known_path in list_known(str(root.resolve())):
+                if known_path not in seen_paths and not Path(known_path).exists():
+                    if self.indexer.remove_document(known_path):
+                        removed += 1
+        return removed
 
     async def _crawl_one(self, path: Path, stats: CrawlStats) -> None:
         try:
